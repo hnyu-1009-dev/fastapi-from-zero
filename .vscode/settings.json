@@ -1,0 +1,6 @@
+{
+  // ✅ Use separate blocks instead
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  }
+}
