@@ -125,56 +125,55 @@ async def upload_large_file(file: UploadFile):
     }
 
 
-# ==========================================
-# 4. 路由定义 (续写部分)
-# ==========================================
-
-
-@app.post("/batch-upload/", summary="批量文件上传接口")
+# 文件流式批量上传
+@app.post("/batch-upload/", summary="批量文件流式上传接口")
 async def batch_upload(
-    # 使用 list[UploadFile] 让接口能够接收多个文件
-    # File(...) 表示这个参数是强制必填的
-    files: list[UploadFile] = File(..., description="支持同时上传多个文件")
+    files: list[UploadFile] = File(..., description="支持同时上传多个大文件")
 ):
     """
-    【批量上传模式】
-    - 循环遍历文件列表，对每个文件执行保存逻辑。
+    【批量模式 + 流式分块写入】
+    - 针对列表中的每个文件，采用分块读取模式。
+    - 内存占用极低，支持 GB 级多文件并发上传。
     """
     results = []
 
     for file in files:
-        # 1. 为每个文件生成安全的文件名
+        # 1. 安全性处理：提取纯文件名并构建目标路径
         safe_name = os.path.basename(file.filename)
-        """
-        # 场景 A：完整的绝对路径
-        path_a = "/home/user/project/uploads/test.jpg"
-        print(os.path.basename(path_a))  
-        # 输出结果: "test.jpg"
-
-        # 场景 B：只有文件名的路径
-        path_b = "quick_save.png"
-        print(os.path.basename(path_b))  
-        # 输出结果: "quick_save.png"
-        
-        # 场景 C：以斜杠结尾的路径（目录路径）
-        path_c = "/home/user/project/uploads/"
-        print(os.path.basename(path_c))  
-        # 输出结果: "" (返回空字符串，因为它认为最后是一个文件夹)
-        """
         dest_path = STORAGE_DIR / safe_name
 
-        # 2. 保存文件（这里使用简单的一次性写入，实际大文件建议用流式）
-        content = await file.read()
-        async with aiofiles.open(dest_path, "wb") as f:
-            await f.write(content)
+        try:
+            # 2. 异步流式写入
+            async with aiofiles.open(dest_path, "wb") as out_file:
+                # 循环读取：每次只读入指定大小（如 1MB）到内存
+                while chunk := await file.read(STREAM_CHUNK_SIZE):
+                    # 1. 执行读取并将结果赋值给 chunk
+                    # 2. 同时判断 chunk 是否有内容（如果为空，while 循环自动结束）
+                    await out_file.write(chunk)
 
-        # 3. 记录每个文件的保存状态
-        results.append({"filename": safe_name, "status": "success"})
+            # 计算文件大小（字节转为 KB）
+            file_size_kb = dest_path.stat().st_size / 1024
+            results.append(
+                {
+                    "filename": safe_name,
+                    "status": "success",
+                    "size": f"{file_size_kb:.2f} KB",
+                }
+            )
 
-        # 记得关闭每个文件的句柄
-        await file.close()
+        except Exception as err:
+            # 异常处理：如果某个文件传输失败，清理写了一半的残余文件
+            if dest_path.exists():
+                os.remove(dest_path)
+            results.append(
+                {"filename": safe_name, "status": "failed", "error": str(err)}
+            )
 
-    return {"uploaded_files": results, "total_count": len(files)}
+        finally:
+            # 3. 资源释放：必须关闭 UploadFile 对象以清理临时文件
+            await file.close()
+
+    return {"msg": "批量处理完成", "total": len(files), "details": results}
 
 
 # 限制上传格式：定义允许的后缀名集合（使用 set 查找效率更高）
@@ -224,3 +223,6 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
+
+# 启动指令
+# uvicorn main:app --reload --host 127.0.0.1 --port 8000
